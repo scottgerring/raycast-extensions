@@ -9,131 +9,153 @@ const TEMPERATURE_STEP = (WARM_TEMPERATURE - COLD_TEMPERATURE) / 20; // 5%
 
 interface Preferences {
   keyLights_count: string;
+  keyLights_ips?: string; 
+}
+
+// Config for a single keylight
+interface KeylightConfig {
+  ip: string;
+  port: number;
 }
 
 export class KeyLight {
-  static keyLights: Array<KeyLight>;
+  static keyLights: KeylightConfig[] = [];
 
   static async discover() {
-    const bonjour = Bonjour();
-    this.keyLights = [];
-
     const preferences = getPreferenceValues<Preferences>();
-    const count: number = parseInt(preferences.keyLights_count, 10);
 
-    const find = new Promise<KeyLight>((resolve) => {
-      bonjour.find({ type: "elg" }, (service) => {
-        const keyLight = new KeyLight(service);
-        this.keyLights.push(keyLight);
+    // Check if static IPs are provided
+    if (preferences.keyLights_ips) {
+      const ips = preferences.keyLights_ips.split(",").map((ip) => ip.trim());
+      console.log(`🔧 Using static IPs: ${ips.join(", ")}`);
 
-        if (this.keyLights.length == count) {
-          resolve(keyLight);
-          bonjour.destroy();
-        }
-      });
-    });
-
-    return waitUntil(find, { timeoutMessage: "Cannot discover any Key Lights in the network" });
-  }
-
-  private service: RemoteService;
-
-  private constructor(service: RemoteService) {
-    this.service = service;
-  }
-
-  async toggle() {
-    let newState;
-    for (let x = 0; x < KeyLight.keyLights.length; x++) {
-      try {
-        const keyLight = await this.getKeyLight(KeyLight.keyLights[x].service);
-        newState = !keyLight.on;
-        await this.updateKeyLight(KeyLight.keyLights[x].service, { on: newState });
-      } catch (e) {
-        throw new Error("Failed toggling Key Light");
-      }
+      KeyLight.keyLights = ips.map((ip) => ({ ip, port: 9123 }));
+      return KeyLight;
     }
 
+    // Otherwise, perform Bonjour discovery
+    console.log("🔍 Discovering Key Lights using Bonjour...");
+    const bonjour = Bonjour();
+    KeyLight.keyLights = [];
+    const count: number = parseInt(preferences.keyLights_count, 10);
+
+    const find = new Promise<KeylightConfig[]>((resolve, reject) => {
+      bonjour.find({ type: "elg" }, (service) => {
+        if (service.referer?.address && service.port) {
+          const keylightConfig: KeylightConfig = {
+            ip: service.referer.address,
+            port: service.port,
+          };
+          KeyLight.keyLights.push(keylightConfig);
+
+          if (KeyLight.keyLights.length === count) {
+            resolve(KeyLight.keyLights);
+            bonjour.destroy();
+          }
+        }
+      });
+
+      setTimeout(() => {
+        if (KeyLight.keyLights.length === 0) {
+          reject(new Error("Cannot discover any Key Lights in the network"));
+        }
+      }, 5000);
+    });
+
+    return waitUntil(find);
+  }
+
+  static async toggle() {
+    let newState;
+    for (const keyLight of KeyLight.keyLights) {
+      try {
+        const state = await KeyLight.getKeyLight(keyLight);
+        newState = !state.on;
+        await KeyLight.updateKeyLight(keyLight, { on: newState });
+      } catch (e) {
+        throw new Error(`Failed toggling Key Light at ${keyLight.ip}`);
+      }
+    }
     return newState;
   }
 
-  async increaseBrightness() {
+  static async increaseBrightness() {
     let newBrightness;
-    for (let x = 0; x < KeyLight.keyLights.length; x++) {
+    for (const keyLight of KeyLight.keyLights) {
       try {
-        const keyLight = await this.getKeyLight(KeyLight.keyLights[x].service);
-        newBrightness = Math.min(keyLight.brightness + 5, 100);
-        await this.updateKeyLight(KeyLight.keyLights[x].service, { brightness: newBrightness });
+        const state = await KeyLight.getKeyLight(keyLight);
+        newBrightness = Math.min(state.brightness + 5, 100);
+        await KeyLight.updateKeyLight(keyLight, { brightness: newBrightness });
       } catch (e) {
-        throw new Error("Failed increasing brightness");
+        throw new Error(`Failed increasing brightness for ${keyLight.ip}`);
       }
     }
-
     return newBrightness;
   }
 
-  async decreaseBrightness() {
+  static async decreaseBrightness() {
     let newBrightness;
-    for (let x = 0; x < KeyLight.keyLights.length; x++) {
+    for (const keyLight of KeyLight.keyLights) {
       try {
-        const keyLight = await this.getKeyLight(KeyLight.keyLights[x].service);
-        newBrightness = Math.min(keyLight.brightness - 5, 100);
-        await this.updateKeyLight(KeyLight.keyLights[x].service, { brightness: newBrightness });
+        const state = await KeyLight.getKeyLight(keyLight);
+        newBrightness = Math.max(state.brightness - 5, 0);
+        await KeyLight.updateKeyLight(keyLight, { brightness: newBrightness });
       } catch (e) {
-        throw new Error("Failed increasing brightness");
+        throw new Error(`Failed decreasing brightness for ${keyLight.ip}`);
       }
     }
-
     return newBrightness;
   }
 
-  async increaseTemperature() {
+  static async increaseTemperature() {
     let newTemperature;
-    for (let x = 0; x < KeyLight.keyLights.length; x++) {
+    for (const keyLight of KeyLight.keyLights) {
       try {
-        const keyLight = await this.getKeyLight(KeyLight.keyLights[x].service);
-        newTemperature = Math.max(keyLight.temperature + TEMPERATURE_STEP, COLD_TEMPERATURE);
-        await this.updateKeyLight(KeyLight.keyLights[x].service, { temperature: newTemperature });
+        const state = await KeyLight.getKeyLight(keyLight);
+        newTemperature = Math.min(state.temperature + TEMPERATURE_STEP, WARM_TEMPERATURE);
+        await KeyLight.updateKeyLight(keyLight, { temperature: newTemperature });
       } catch (e) {
-        throw new Error("Failed decreasing temperature");
+        throw new Error(`Failed increasing temperature for ${keyLight.ip}`);
       }
     }
-
     return newTemperature;
   }
 
-  async decreaseTemperature() {
+  static async decreaseTemperature() {
     let newTemperature;
-    for (let x = 0; x < KeyLight.keyLights.length; x++) {
+    for (const keyLight of KeyLight.keyLights) {
       try {
-        const keyLight = await this.getKeyLight(KeyLight.keyLights[x].service);
-        newTemperature = Math.max(keyLight.temperature - TEMPERATURE_STEP, COLD_TEMPERATURE);
-        await this.updateKeyLight(KeyLight.keyLights[x].service, { temperature: newTemperature });
+        const state = await KeyLight.getKeyLight(keyLight);
+        newTemperature = Math.max(state.temperature - TEMPERATURE_STEP, COLD_TEMPERATURE);
+        await KeyLight.updateKeyLight(keyLight, { temperature: newTemperature });
       } catch (e) {
-        throw new Error("Failed decreasing temperature");
+        throw new Error(`Failed decreasing temperature for ${keyLight.ip}`);
       }
     }
-
     return newTemperature;
   }
 
-  private async getKeyLight(service: RemoteService) {
-    const url = `http://${service.referer.address}:${service.port}/elgato/lights`;
-    const response = await axios.get(url);
-    return response.data.lights[0];
+  private static async getKeyLight(config: KeylightConfig) {
+    const url = `http://${config.ip}:${config.port}/elgato/lights`;
+    try {
+      const response = await axios.get(url);
+      return response.data.lights[0];
+    } catch (error) {
+      throw new Error(`Failed to fetch Key Light state from ${url}`);
+    }
   }
 
-  private async updateKeyLight(
-    service: RemoteService,
+  private static async updateKeyLight(
+    config: KeylightConfig,
     options: { brightness?: number; temperature?: number; on?: boolean },
   ) {
-    const url = `http://${service.referer.address}:${service.port}/elgato/lights`;
-    await axios.put(url, {
-      lights: [
-        {
-          ...options,
-        },
-      ],
-    });
+    const url = `http://${config.ip}:${config.port}/elgato/lights`;
+    try {
+      await axios.put(url, {
+        lights: [{ ...options }],
+      });
+    } catch (error) {
+      throw new Error(`Failed to update Key Light state at ${url}`);
+    }
   }
 }
